@@ -101,5 +101,8 @@ add_mguard_safe_test(mmap_edge)
 # Quarantine behavior tests
 add_mguard_safe_test(quarantine)
 
+# Signal handler chaining test
+add_mguard_safe_test(chain)
+
 # Stress and concurrency tests (needs pthread)
 add_mguard_safe_test_pthread(stress)

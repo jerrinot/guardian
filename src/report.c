@@ -6,6 +6,37 @@
 #include <stdlib.h>
 #include <stdint.h>
 
+/* Saved handlers for chaining (e.g., JVM installs its own) */
+static struct sigaction old_sigsegv_action;
+static struct sigaction old_sigbus_action;
+
+/*
+ * Chain to previous signal handler.
+ * Used when fault is not in mguard-managed memory (e.g., JVM internal SIGSEGV).
+ */
+static void chain_handler(struct sigaction *old_action, int sig, siginfo_t *info, void *ucontext) {
+    if (old_action->sa_flags & SA_SIGINFO) {
+        if (old_action->sa_sigaction) {
+            old_action->sa_sigaction(sig, info, ucontext);
+            return;
+        }
+    } else {
+        if (old_action->sa_handler == SIG_DFL) {
+            signal(sig, SIG_DFL);
+            raise(sig);
+            return;
+        } else if (old_action->sa_handler == SIG_IGN) {
+            return;
+        } else if (old_action->sa_handler) {
+            old_action->sa_handler(sig);
+            return;
+        }
+    }
+    /* No handler - use default */
+    signal(sig, SIG_DFL);
+    raise(sig);
+}
+
 /*
  * Async-signal-safe write to stderr.
  * Uses write() syscall directly, not stdio.
@@ -111,72 +142,66 @@ static void print_entry_info(alloc_entry_t *entry) {
  * SIGSEGV handler - called when guard page is accessed.
  */
 static void sigsegv_handler(int sig, siginfo_t *info, void *ucontext) {
-    (void)sig;
-    (void)ucontext;
-
     void *fault_addr = info->si_addr;
     char buf[32];
 
     /* Look up allocation containing this address */
     alloc_entry_t *entry = registry_lookup_containing(fault_addr);
 
+    /*
+     * If fault is not in mguard-managed memory, chain to previous handler.
+     * This is critical for JVM which uses SIGSEGV for null checks, safepoints, etc.
+     */
+    if (!entry) {
+        chain_handler(&old_sigsegv_action, sig, info, ucontext);
+        return;
+    }
+
+    uintptr_t user_start = (uintptr_t)entry->user_addr;
+    uintptr_t user_end = user_start + entry->user_size;
+    uintptr_t fault = (uintptr_t)fault_addr;
+
+    /*
+     * Fault within valid user buffer is not ours - chain to previous handler.
+     * Could be JVM internal or other legitimate SIGSEGV usage.
+     */
+    if (fault >= user_start && fault < user_end && entry->magic != MAGIC_FREED) {
+        chain_handler(&old_sigsegv_action, sig, info, ucontext);
+        return;
+    }
+
+    /* This is our fault - report it */
     print_separator();
 
-    if (entry) {
-        uintptr_t user_start = (uintptr_t)entry->user_addr;
-        uintptr_t user_end = user_start + entry->user_size;
-        uintptr_t fault = (uintptr_t)fault_addr;
-
-        if (entry->magic == MAGIC_FREED) {
-            write_line("MGUARD: Use-after-free detected!");
-            print_separator();
-            write_str("Fault address:   ");
-            ptr_to_hex(fault_addr, buf, sizeof(buf));
-            write_line(buf);
-            print_entry_info(entry);
-        } else if (fault >= user_end) {
-            /* Fault past end of user buffer - overflow */
-            write_line("MGUARD: Buffer overflow detected!");
-            print_separator();
-            write_str("Fault address:   ");
-            ptr_to_hex(fault_addr, buf, sizeof(buf));
-            write_line(buf);
-            print_entry_info(entry);
-            write_str("Overflow:        ");
-            size_to_str(fault - user_end + 1, buf, sizeof(buf));
-            write_str(buf);
-            write_line(" byte(s) past end");
-        } else if (fault < user_start) {
-            /* Fault before start of user buffer - underflow */
-            write_line("MGUARD: Buffer underflow detected!");
-            print_separator();
-            write_str("Fault address:   ");
-            ptr_to_hex(fault_addr, buf, sizeof(buf));
-            write_line(buf);
-            print_entry_info(entry);
-            write_str("Underflow:       ");
-            size_to_str(user_start - fault, buf, sizeof(buf));
-            write_str(buf);
-            write_line(" byte(s) before start");
-        } else {
-            /* Fault within user buffer - not mguard's detection, pass through */
-            write_line("MGUARD: SIGSEGV within valid allocation (not overflow)");
-            print_separator();
-            write_str("Fault address:   ");
-            ptr_to_hex(fault_addr, buf, sizeof(buf));
-            write_line(buf);
-            print_entry_info(entry);
-            write_str("Offset:          ");
-            size_to_str(fault - user_start, buf, sizeof(buf));
-            write_str(buf);
-            write_line(" byte(s) from start (within buffer)");
-        }
-    } else {
-        write_line("MGUARD: SIGSEGV at unknown address");
+    if (entry->magic == MAGIC_FREED) {
+        write_line("MGUARD: Use-after-free detected!");
         print_separator();
         write_str("Fault address:   ");
         ptr_to_hex(fault_addr, buf, sizeof(buf));
         write_line(buf);
+        print_entry_info(entry);
+    } else if (fault >= user_end) {
+        write_line("MGUARD: Buffer overflow detected!");
+        print_separator();
+        write_str("Fault address:   ");
+        ptr_to_hex(fault_addr, buf, sizeof(buf));
+        write_line(buf);
+        print_entry_info(entry);
+        write_str("Overflow:        ");
+        size_to_str(fault - user_end + 1, buf, sizeof(buf));
+        write_str(buf);
+        write_line(" byte(s) past end");
+    } else if (fault < user_start) {
+        write_line("MGUARD: Buffer underflow detected!");
+        print_separator();
+        write_str("Fault address:   ");
+        ptr_to_hex(fault_addr, buf, sizeof(buf));
+        write_line(buf);
+        print_entry_info(entry);
+        write_str("Underflow:       ");
+        size_to_str(user_start - fault, buf, sizeof(buf));
+        write_str(buf);
+        write_line(" byte(s) before start");
     }
 
     print_separator();
@@ -190,35 +215,30 @@ static void sigsegv_handler(int sig, siginfo_t *info, void *ucontext) {
  * SIGBUS handler - called on bus error (e.g., file mapping beyond EOF).
  */
 static void sigbus_handler(int sig, siginfo_t *info, void *ucontext) {
-    (void)sig;
-    (void)ucontext;
-
     void *fault_addr = info->si_addr;
     char buf[32];
 
     alloc_entry_t *entry = registry_lookup_containing(fault_addr);
 
-    print_separator();
-
-    if (entry) {
-        write_line("MGUARD: SIGBUS in tracked allocation (file mapping issue?)");
-        print_separator();
-        write_str("Fault address:   ");
-        ptr_to_hex(fault_addr, buf, sizeof(buf));
-        write_line(buf);
-        print_entry_info(entry);
-        write_str("Offset:          ");
-        size_to_str((uintptr_t)fault_addr - (uintptr_t)entry->user_addr, buf, sizeof(buf));
-        write_str(buf);
-        write_line(" byte(s) from start");
-    } else {
-        write_line("MGUARD: SIGBUS at unknown address");
-        print_separator();
-        write_str("Fault address:   ");
-        ptr_to_hex(fault_addr, buf, sizeof(buf));
-        write_line(buf);
+    /*
+     * If fault is not in mguard-managed memory, chain to previous handler.
+     */
+    if (!entry) {
+        chain_handler(&old_sigbus_action, sig, info, ucontext);
+        return;
     }
 
+    print_separator();
+    write_line("MGUARD: SIGBUS in tracked allocation (file mapping issue?)");
+    print_separator();
+    write_str("Fault address:   ");
+    ptr_to_hex(fault_addr, buf, sizeof(buf));
+    write_line(buf);
+    print_entry_info(entry);
+    write_str("Offset:          ");
+    size_to_str((uintptr_t)fault_addr - (uintptr_t)entry->user_addr, buf, sizeof(buf));
+    write_str(buf);
+    write_line(" byte(s) from start");
     print_separator();
 
     signal(SIGBUS, SIG_DFL);
@@ -231,11 +251,11 @@ void report_init(void) {
     sa.sa_sigaction = sigsegv_handler;
     sa.sa_flags = SA_SIGINFO;
     sigemptyset(&sa.sa_mask);
-    sigaction(SIGSEGV, &sa, NULL);
+    sigaction(SIGSEGV, &sa, &old_sigsegv_action);
 
     /* Also handle SIGBUS for file mapping issues */
     sa.sa_sigaction = sigbus_handler;
-    sigaction(SIGBUS, &sa, NULL);
+    sigaction(SIGBUS, &sa, &old_sigbus_action);
 }
 
 void report_double_free(void *ptr, alloc_entry_t *entry) {
