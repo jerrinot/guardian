@@ -1,0 +1,48 @@
+# Build directories
+build/
+cmake-build-*/
+out/
+
+# CMake generated files
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+*.cmake
+!cmake/*.cmake
+
+# Compiled objects
+*.o
+*.a
+*.so
+*.so.*
+*.dylib
+
+# Executables
+*.exe
+test_*
+!tests/test_*.c
+
+# IDE and editor files
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Testing artifacts
+Testing/
+CTestTestfile.cmake
+
+# Generated config
+include/mguard/config.h
+
+# Core dumps
+core
+core.*
+vgcore.*
+
+# Temporary files
+*.tmp
+*.log
