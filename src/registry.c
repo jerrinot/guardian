@@ -1,3 +1,51 @@
+/*
+ * registry.c - Hash table tracking all mguard-managed allocations
+ *
+ * DATA STRUCTURE LAYOUT
+ * =====================
+ *
+ * Hash Table (separate chaining):
+ *
+ *   buckets[] (dynamically allocated, default 65536 slots via MGUARD_BUCKETS)
+ *   ┌─────────┬─────────┬─────────┬─────────┬─────────┐
+ *   │    0    │    1    │    2    │   ...   │  65535  │
+ *   └────┬────┴────┬────┴────┬────┴─────────┴────┬────┘
+ *        │         │         │                   │
+ *        ▼         ▼         ▼                   ▼
+ *      NULL    ┌───────┐   NULL              ┌───────┐
+ *              │ entry │                     │ entry │
+ *              │ next ─┼─► NULL              │ next ─┼─► entry ─► NULL
+ *              └───────┘                     └───────┘
+ *
+ *   bucket_locks[] (parallel array, one mutex per bucket for fine-grained locking)
+ *
+ * Entry Pool (avoids malloc recursion):
+ *
+ *   pool_chunks: linked list of mmap'd chunks, each holding 65536 entries
+ *   ┌────────────┐     ┌────────────┐
+ *   │ pool_chunk │ ──► │ pool_chunk │ ──► NULL
+ *   │ entries[]  │     │ entries[]  │
+ *   └────────────┘     └────────────┘
+ *
+ *   free_list: LIFO stack of unused entries (reuses 'next' pointer)
+ *
+ * OPERATIONS
+ * ==========
+ *   registry_insert()           O(1)           bucket_locks[hash]
+ *   registry_lookup()           O(chain_len)   bucket_locks[hash]
+ *   registry_remove()           O(chain_len)   bucket_locks[hash]
+ *   registry_lookup_containing() O(n×chain)    all locks (signal handler only)
+ *   registry_alloc_entry()      O(1)           pool_lock
+ *   registry_free_entry()       O(1)           pool_lock
+ *
+ * HASH FUNCTION
+ * =============
+ *   hash = ((addr >> 4) ^ (addr >> 12) ^ (addr >> 20)) & (buckets - 1)
+ *
+ *   Skips low 4 bits (16-byte alignment) and mixes higher bits for
+ *   better distribution across buckets.
+ */
+
 #include "registry.h"
 #include "config.h"
 #include "interpose.h"
@@ -6,13 +54,12 @@
 #include <string.h>
 #include <stdio.h>
 
-#define REGISTRY_BUCKETS 4096
-#define REGISTRY_BUCKET_MASK (REGISTRY_BUCKETS - 1)
 #define ENTRY_POOL_CHUNK 65536UL  /* Entries per chunk */
+#define REGISTRY_LOAD_WARN_THRESHOLD 4  /* Warn when chain length exceeds this */
 
-/* Hash table buckets */
-static alloc_entry_t *buckets[REGISTRY_BUCKETS];
-static pthread_mutex_t bucket_locks[REGISTRY_BUCKETS];
+/* Hash table buckets - dynamically allocated based on MGUARD_BUCKETS */
+static alloc_entry_t **buckets;
+static pthread_mutex_t *bucket_locks;
 
 /* Entry pool chunks (linked list of mmap'd chunks) */
 typedef struct pool_chunk {
@@ -28,12 +75,13 @@ static pthread_mutex_t pool_lock = PTHREAD_MUTEX_INITIALIZER;
 /* Statistics */
 static atomic_size_t active_count;
 static atomic_size_t active_bytes;
+static int load_warning_printed;
 
 static inline size_t hash_addr(void *addr) {
     uintptr_t val = (uintptr_t)addr;
     /* Mix bits for better distribution */
     val = (val >> 4) ^ (val >> 12) ^ (val >> 20);
-    return val & REGISTRY_BUCKET_MASK;
+    return val & (g_config.registry_buckets - 1);
 }
 
 /*
@@ -69,8 +117,24 @@ static int grow_pool(void) {
 }
 
 void registry_init(void) {
+    size_t num_buckets = g_config.registry_buckets;
+
+    /* Allocate bucket arrays via mmap to avoid malloc recursion */
+    size_t buckets_bytes = num_buckets * sizeof(alloc_entry_t *);
+    size_t locks_bytes = num_buckets * sizeof(pthread_mutex_t);
+
+    buckets = real_mmap(NULL, buckets_bytes, PROT_READ | PROT_WRITE,
+                        MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    bucket_locks = real_mmap(NULL, locks_bytes, PROT_READ | PROT_WRITE,
+                             MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+
+    if (buckets == MAP_FAILED || bucket_locks == MAP_FAILED) {
+        fprintf(stderr, "[mguard] FATAL: failed to allocate registry buckets\n");
+        return;
+    }
+
     /* Initialize bucket locks */
-    for (size_t i = 0; i < REGISTRY_BUCKETS; i++) {
+    for (size_t i = 0; i < num_buckets; i++) {
         pthread_mutex_init(&bucket_locks[i], NULL);
         buckets[i] = NULL;
     }
@@ -83,6 +147,10 @@ void registry_init(void) {
 
     atomic_store(&active_count, 0);
     atomic_store(&active_bytes, 0);
+
+    if (g_config.verbose) {
+        fprintf(stderr, "[mguard] registry: %zu buckets allocated\n", num_buckets);
+    }
 }
 
 alloc_entry_t *registry_alloc_entry(void) {
@@ -123,10 +191,23 @@ void registry_insert(alloc_entry_t *entry) {
     pthread_mutex_lock(&bucket_locks[bucket]);
     entry->next = buckets[bucket];
     buckets[bucket] = entry;
+
+    /* Count chain length while we have the lock */
+    size_t chain_len = 0;
+    for (alloc_entry_t *e = buckets[bucket]; e; e = e->next) chain_len++;
+
     pthread_mutex_unlock(&bucket_locks[bucket]);
 
     atomic_fetch_add(&active_count, 1);
     atomic_fetch_add(&active_bytes, entry->real_size);
+
+    /* Warn once if any chain gets too long */
+    if (!load_warning_printed && chain_len > REGISTRY_LOAD_WARN_THRESHOLD) {
+        load_warning_printed = 1;
+        fprintf(stderr, "[mguard] WARNING: registry chain length %zu exceeds threshold %d. "
+                "Performance may degrade. Consider setting MGUARD_BUCKETS=%zu or higher.\n",
+                chain_len, REGISTRY_LOAD_WARN_THRESHOLD, g_config.registry_buckets * 4);
+    }
 }
 
 alloc_entry_t *registry_lookup(void *user_addr) {
@@ -152,7 +233,7 @@ alloc_entry_t *registry_lookup_containing(void *addr) {
     if (!addr) return NULL;
 
     /* Must scan all buckets - this is slow but only used in signal handler */
-    for (size_t i = 0; i < REGISTRY_BUCKETS; i++) {
+    for (size_t i = 0; i < g_config.registry_buckets; i++) {
         pthread_mutex_lock(&bucket_locks[i]);
         alloc_entry_t *entry = buckets[i];
         while (entry) {

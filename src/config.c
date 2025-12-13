@@ -50,4 +50,18 @@ void config_init(void) {
     long min_size = parse_env_long("MGUARD_MIN_SIZE", 0);
     if (min_size < 0) min_size = 0;
     g_config.min_size = (size_t)min_size;
+
+    /* Registry buckets - must be power of 2 */
+    long buckets = parse_env_long("MGUARD_BUCKETS", 65536);
+    if (buckets < 1024) buckets = 1024;
+    if (buckets > 1048576) buckets = 1048576;
+    /* Round up to next power of 2 */
+    buckets--;
+    buckets |= buckets >> 1;
+    buckets |= buckets >> 2;
+    buckets |= buckets >> 4;
+    buckets |= buckets >> 8;
+    buckets |= buckets >> 16;
+    buckets++;
+    g_config.registry_buckets = (size_t)buckets;
 }
