@@ -293,7 +293,7 @@ void free(void *ptr) {
     entry->magic = MAGIC_FREED;
 
     /* Add to quarantine or release immediately */
-    if (g_config.quarantine_bytes > 0) {
+    if (g_config.quarantine_entries > 0) {
         /*
          * Keep entry in registry for double-free detection.
          * The entry stays with MAGIC_FREED so subsequent free()

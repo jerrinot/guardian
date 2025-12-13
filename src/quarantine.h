@@ -5,7 +5,7 @@
 
 /*
  * Initialize the quarantine ring buffer.
- * Uses g_config.quarantine_bytes for max size.
+ * Uses g_config.quarantine_entries for capacity.
  */
 void quarantine_init(void);
 

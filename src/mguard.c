@@ -39,9 +39,9 @@ static void mguard_init(void) {
     report_init();
 
     if (g_config.verbose) {
-        fprintf(stderr, "[mguard] initialized (page_size=%zu, quarantine=%zu MB)\n",
+        fprintf(stderr, "[mguard] initialized (page_size=%zu, quarantine=%zu entries)\n",
                 g_config.page_size,
-                g_config.quarantine_bytes / (1024 * 1024));
+                g_config.quarantine_entries);
     }
 
     g_mguard_initialized = 1;

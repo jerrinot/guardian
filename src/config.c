@@ -40,9 +40,10 @@ void config_init(void) {
     g_config.enabled = (int)parse_env_long("MGUARD_ENABLED", 1);
     g_config.protect_below = (int)parse_env_long("MGUARD_PROTECT_BELOW", 0);
 
-    long quarantine_mb = parse_env_long("MGUARD_QUARANTINE_MB", 64);
-    if (quarantine_mb < 0) quarantine_mb = 0;
-    g_config.quarantine_bytes = (size_t)quarantine_mb * 1024 * 1024;
+    /* Quarantine uses virtual address space only (no physical RAM) thanks to MADV_GUARD */
+    long quarantine = parse_env_long("MGUARD_QUARANTINE", 1048576);
+    if (quarantine < 0) quarantine = 0;
+    g_config.quarantine_entries = (size_t)quarantine;
 
     g_config.fill_pattern = (uint8_t)parse_env_ulong("MGUARD_FILL", 0xAA);
     g_config.verbose = (int)parse_env_long("MGUARD_VERBOSE", 0);

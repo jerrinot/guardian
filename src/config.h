@@ -7,7 +7,7 @@
 typedef struct {
     int enabled;              /* MGUARD_ENABLED (default: 1) */
     int protect_below;        /* MGUARD_PROTECT_BELOW (default: 0) */
-    size_t quarantine_bytes;  /* MGUARD_QUARANTINE_MB * 1024 * 1024 */
+    size_t quarantine_entries;/* MGUARD_QUARANTINE (default: 1048576) */
     uint8_t fill_pattern;     /* MGUARD_FILL (default: 0xAA) */
     int verbose;              /* MGUARD_VERBOSE (default: 0) */
     size_t min_size;          /* MGUARD_MIN_SIZE (default: 0) */
