@@ -165,14 +165,21 @@ void *malloc(size_t size) {
         return p;
     }
 
+    /* Handle zero-size allocations - delegate to real malloc.
+     * C standard allows malloc(0) to return NULL or a unique pointer.
+     * Many programs (including JVM) expect a valid pointer. */
+    if (size == 0) {
+        void *p = real_malloc(size);
+        TRACE("malloc(0) = %p [real, zero-size]", p);
+        return p;
+    }
+
     /* Skip small allocations if configured */
     if (size < g_config.min_size) {
         void *p = real_malloc(size);
         TRACE("malloc(%zu) = %p [real, below min_size=%zu]", size, p, g_config.min_size);
         return p;
     }
-
-    if (size == 0) return NULL;
 
     g_in_mguard = 1;
 
@@ -397,12 +404,17 @@ void *realloc(void *ptr, size_t size) {
 }
 
 void *memalign(size_t alignment, size_t size) {
-    if (size == 0) return NULL;
-
     /* Fast path */
     if (!real_memalign || g_in_mguard || !g_mguard_initialized || !g_config.enabled) {
         void *p = real_memalign ? real_memalign(alignment, size) : NULL;
         TRACE("memalign(%zu, %zu) = %p [real]", alignment, size, p);
+        return p;
+    }
+
+    /* Handle zero-size - delegate to real memalign */
+    if (size == 0) {
+        void *p = real_memalign(alignment, size);
+        TRACE("memalign(%zu, 0) = %p [real, zero-size]", alignment, p);
         return p;
     }
 

@@ -14,12 +14,40 @@
 int main(void) {
     printf("=== Edge Case Tests ===\n");
 
-    /* Test 1: malloc(0) - implementation defined, but should not crash */
-    TEST("malloc(0)");
+    /* Test 1: malloc(0) - glibc returns a unique pointer, we delegate to real malloc */
+    TEST("malloc(0) returns valid pointer");
     {
         void *p = malloc(0);
-        /* Can return NULL or a unique pointer - either is valid */
-        if (p) free(p);
+        /* glibc and most allocators return a unique non-NULL pointer */
+        if (!p) FAIL("malloc(0) returned NULL - many programs expect non-NULL");
+        free(p);
+        PASS();
+    }
+
+    /* Test 1b: Multiple malloc(0) calls return unique pointers */
+    TEST("malloc(0) returns unique pointers");
+    {
+        void *p1 = malloc(0);
+        void *p2 = malloc(0);
+        void *p3 = malloc(0);
+        if (!p1 || !p2 || !p3) FAIL("malloc(0) returned NULL");
+        if (p1 == p2 || p2 == p3 || p1 == p3) FAIL("malloc(0) returned duplicate pointers");
+        free(p1);
+        free(p2);
+        free(p3);
+        PASS();
+    }
+
+    /* Test 1c: calloc(0, x) and calloc(x, 0) */
+    TEST("calloc with zero");
+    {
+        void *p1 = calloc(0, 100);
+        void *p2 = calloc(100, 0);
+        void *p3 = calloc(0, 0);
+        /* These should behave like malloc(0) */
+        if (p1) free(p1);
+        if (p2) free(p2);
+        if (p3) free(p3);
         PASS();
     }
 
