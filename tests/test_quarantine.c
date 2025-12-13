@@ -1,7 +1,6 @@
 /*
  * Test: Quarantine behavior tests
  * Tests that quarantine properly holds freed memory and evicts old entries.
- * Note: Some tests require specific MGUARD_QUARANTINE_MB settings.
  */
 #include <stdlib.h>
 #include <string.h>

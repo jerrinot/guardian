@@ -49,7 +49,8 @@ User pointer positioned so overflow hits guard page. Pre/post padding filled wit
 
 - `MGUARD_ENABLED=0|1` - Enable/disable (default: 1)
 - `MGUARD_PROTECT_BELOW=1` - Guard page before buffer (underflow detection)
-- `MGUARD_QUARANTINE_MB=N` - Quarantine size in MB (default: 64)
+- `MGUARD_QUARANTINE=N` - Quarantine capacity in entries (default: 1048576). Uses no physical RAM.
+- `MGUARD_BUCKETS=N` - Registry hash buckets, must be power of 2 (default: 65536)
 - `MGUARD_VERBOSE=1` - Trace allocations to stderr
 - `MGUARD_MIN_SIZE=N` - Skip guarding allocations smaller than N bytes
 
