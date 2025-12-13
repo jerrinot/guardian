@@ -14,6 +14,21 @@ static struct sigaction old_sigbus_action;
 static volatile sig_atomic_t in_sigsegv_handler = 0;
 static volatile sig_atomic_t in_sigbus_handler = 0;
 
+/* Check if running in JVM mode (from interpose.c) */
+extern int mguard_has_jvm_wrapper(void);
+
+/*
+ * Terminate the process. In JVM mode, trigger SIGSEGV so the JVM
+ * generates hs_err. Otherwise, call abort().
+ */
+static void mguard_die(void) {
+    if (mguard_has_jvm_wrapper()) {
+        /* Trigger SIGSEGV so JVM generates hs_err */
+        *(volatile int *)0 = 0;
+    }
+    abort();
+}
+
 /*
  * Chain to previous signal handler.
  * Used when fault is not in mguard-managed memory (e.g., JVM internal SIGSEGV).
@@ -333,7 +348,7 @@ void report_double_free(void *ptr, alloc_entry_t *entry) {
     print_entry_info(entry);
     print_separator();
 
-    abort();
+    mguard_die();
 }
 
 void report_double_munmap(void *ptr, alloc_entry_t *entry) {
@@ -350,7 +365,7 @@ void report_double_munmap(void *ptr, alloc_entry_t *entry) {
     print_entry_info(entry);
     print_separator();
 
-    abort();
+    mguard_die();
 }
 
 void report_overflow_on_free(void *ptr, alloc_entry_t *entry) {
@@ -368,7 +383,7 @@ void report_overflow_on_free(void *ptr, alloc_entry_t *entry) {
     write_line("Padding pattern was corrupted (overflow occurred before free)");
     print_separator();
 
-    abort();
+    mguard_die();
 }
 
 void report_realloc_freed(void *ptr, alloc_entry_t *entry) {
@@ -385,5 +400,5 @@ void report_realloc_freed(void *ptr, alloc_entry_t *entry) {
     print_entry_info(entry);
     print_separator();
 
-    abort();
+    mguard_die();
 }
