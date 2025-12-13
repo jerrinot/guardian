@@ -10,15 +10,15 @@
 int main(void) {
     printf("Testing off-by-one overflow detection...\n");
 
-    /* Allocate 100 bytes */
-    char *buf = malloc(100);
+    /* Allocate 100 bytes - volatile prevents compiler overflow analysis */
+    volatile char *buf = malloc(100);
     if (!buf) {
         fprintf(stderr, "malloc failed\n");
         return 1;
     }
 
     /* Fill with valid data */
-    memset(buf, 'A', 100);
+    memset((void *)buf, 'A', 100);
 
     printf("Buffer at %p, size 100 bytes\n", (void*)buf);
     printf("Writing to buf[100] (one byte past end)...\n");
@@ -28,6 +28,6 @@ int main(void) {
 
     /* Should not reach here */
     printf("ERROR: Off-by-one write was NOT detected!\n");
-    free(buf);
+    free((void *)buf);
     return 1;
 }

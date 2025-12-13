@@ -43,7 +43,8 @@ static void chain_handler(struct sigaction *old_action, int sig, siginfo_t *info
  */
 static void write_str(const char *s) {
     if (s) {
-        write(STDERR_FILENO, s, strlen(s));
+        /* In signal handler - nothing useful we can do if write fails */
+        ssize_t ret __attribute__((unused)) = write(STDERR_FILENO, s, strlen(s));
     }
 }
 

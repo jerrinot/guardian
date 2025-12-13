@@ -67,15 +67,19 @@ static int is_bootstrap_ptr(void *ptr) {
 }
 
 void interpose_init(void) {
-    /* Use dlsym to find the real implementations */
-    real_malloc = (real_malloc_t)dlsym(RTLD_NEXT, "malloc");
-    real_free = (real_free_t)dlsym(RTLD_NEXT, "free");
-    real_calloc = (real_calloc_t)dlsym(RTLD_NEXT, "calloc");
-    real_realloc = (real_realloc_t)dlsym(RTLD_NEXT, "realloc");
-    real_memalign = (real_memalign_t)dlsym(RTLD_NEXT, "memalign");
-    real_mmap = (real_mmap_t)dlsym(RTLD_NEXT, "mmap");
-    real_munmap = (real_munmap_t)dlsym(RTLD_NEXT, "munmap");
-    real_mremap = (real_mremap_t)dlsym(RTLD_NEXT, "mremap");
+    /*
+     * Use dlsym to find the real implementations.
+     * POSIX allows converting void* from dlsym to function pointers,
+     * but ISO C forbids it. Use the POSIX-recommended cast pattern.
+     */
+    *(void **)(&real_malloc) = dlsym(RTLD_NEXT, "malloc");
+    *(void **)(&real_free) = dlsym(RTLD_NEXT, "free");
+    *(void **)(&real_calloc) = dlsym(RTLD_NEXT, "calloc");
+    *(void **)(&real_realloc) = dlsym(RTLD_NEXT, "realloc");
+    *(void **)(&real_memalign) = dlsym(RTLD_NEXT, "memalign");
+    *(void **)(&real_mmap) = dlsym(RTLD_NEXT, "mmap");
+    *(void **)(&real_munmap) = dlsym(RTLD_NEXT, "munmap");
+    *(void **)(&real_mremap) = dlsym(RTLD_NEXT, "mremap");
 }
 
 /*
@@ -462,7 +466,14 @@ void *memalign(size_t alignment, size_t size) {
 }
 
 int posix_memalign(void **memptr, size_t alignment, size_t size) {
+    /*
+     * POSIX requires EINVAL for null memptr, but glibc marks it nonnull.
+     * Disable the warning for this required check.
+     */
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wnonnull-compare"
     if (!memptr) return EINVAL;
+#pragma GCC diagnostic pop
     if (alignment < sizeof(void *) || (alignment & (alignment - 1)) != 0) {
         TRACE("posix_memalign: invalid alignment %zu", alignment);
         return EINVAL;

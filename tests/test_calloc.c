@@ -57,7 +57,14 @@ int main(void) {
     /* Test 5: calloc overflow detection - should return NULL */
     TEST("calloc overflow detection (SIZE_MAX, 2)");
     {
+        /*
+         * Disable warning: we're intentionally testing overflow behavior.
+         * Can't use volatile as GCC still detects this at compile time.
+         */
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Walloc-size-larger-than="
         void *p = calloc(SIZE_MAX, 2);
+#pragma GCC diagnostic pop
         if (p != NULL) {
             free(p);
             FAIL("should have returned NULL for overflow");
@@ -68,7 +75,10 @@ int main(void) {
     /* Test 6: calloc overflow detection - large values */
     TEST("calloc overflow detection (SIZE_MAX/2, 3)");
     {
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Walloc-size-larger-than="
         void *p = calloc(SIZE_MAX / 2, 3);
+#pragma GCC diagnostic pop
         if (p != NULL) {
             free(p);
             FAIL("should have returned NULL for overflow");
