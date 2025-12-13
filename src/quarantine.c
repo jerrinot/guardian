@@ -16,6 +16,7 @@
     } while (0)
 
 #define QUARANTINE_RING_SIZE 65536
+#define EVICT_BATCH_SIZE 32  /* Max entries to evict per batch */
 
 typedef struct {
     alloc_entry_t **ring;
@@ -52,24 +53,47 @@ void quarantine_init(void) {
     pthread_mutex_init(&quarantine.lock, NULL);
 }
 
-static void evict_oldest(void) {
-    if (quarantine.head == quarantine.tail) {
-        return; /* Empty */
+/*
+ * Collect entries to evict while holding lock, then release them outside.
+ * Returns number of entries collected.
+ */
+static size_t collect_evict_batch(alloc_entry_t **batch, size_t max_count,
+                                   size_t bytes_needed) {
+    size_t count = 0;
+
+    while (count < max_count && quarantine.head != quarantine.tail) {
+        /* Stop if we've freed enough space */
+        if (bytes_needed > 0 &&
+            atomic_load(&quarantine.bytes) + bytes_needed <= g_config.quarantine_bytes) {
+            break;
+        }
+
+        alloc_entry_t *old = quarantine.ring[quarantine.tail];
+        quarantine.tail = (quarantine.tail + 1) % quarantine.capacity;
+        atomic_fetch_sub(&quarantine.bytes, old->real_size);
+
+        batch[count++] = old;
     }
 
-    alloc_entry_t *old = quarantine.ring[quarantine.tail];
-    quarantine.tail = (quarantine.tail + 1) % quarantine.capacity;
-    size_t old_bytes = atomic_fetch_sub(&quarantine.bytes, old->real_size);
+    return count;
+}
 
-    TRACE("quarantine evict %p (size=%zu, quarantine_bytes=%zu->%zu)",
-          old->user_addr, old->real_size, old_bytes, old_bytes - old->real_size);
+/*
+ * Release collected entries (called without lock held).
+ */
+static void release_evict_batch(alloc_entry_t **batch, size_t count) {
+    for (size_t i = 0; i < count; i++) {
+        alloc_entry_t *old = batch[i];
 
-    /* Remove from registry (entry was kept there for double-free detection) */
-    registry_remove(old->user_addr);
+        TRACE("quarantine evict %p (size=%zu)", old->user_addr, old->real_size);
 
-    /* Release the memory */
-    real_munmap(old->real_addr, old->real_size);
-    registry_free_entry(old);
+        /* Remove from registry (entry was kept there for double-free detection) */
+        registry_remove(old->user_addr);
+
+        /* Release the memory */
+        real_munmap(old->real_addr, old->real_size);
+        registry_free_entry(old);
+    }
 }
 
 void quarantine_add(alloc_entry_t *entry) {
@@ -84,36 +108,41 @@ void quarantine_add(alloc_entry_t *entry) {
     /* Mark entire allocation as guard (any access will SIGSEGV) */
     guard_install(entry->real_addr, entry->real_size);
 
+    alloc_entry_t *evict_batch[EVICT_BATCH_SIZE];
+    size_t evict_count = 0;
+
     pthread_mutex_lock(&quarantine.lock);
 
-    /* Evict old entries if over limit */
-    while (atomic_load(&quarantine.bytes) + entry->real_size > g_config.quarantine_bytes &&
-           quarantine.head != quarantine.tail) {
-        evict_oldest();
-    }
-
-    /* Check if ring is full */
-    size_t next_head = (quarantine.head + 1) % quarantine.capacity;
-    if (next_head == quarantine.tail) {
-        evict_oldest();
+    /* Collect entries to evict if over limit or ring full */
+    if (atomic_load(&quarantine.bytes) + entry->real_size > g_config.quarantine_bytes ||
+        (quarantine.head + 1) % quarantine.capacity == quarantine.tail) {
+        evict_count = collect_evict_batch(evict_batch, EVICT_BATCH_SIZE, entry->real_size);
     }
 
     /* Add to ring */
     quarantine.ring[quarantine.head] = entry;
-    quarantine.head = next_head;
+    quarantine.head = (quarantine.head + 1) % quarantine.capacity;
     atomic_fetch_add(&quarantine.bytes, entry->real_size);
 
     pthread_mutex_unlock(&quarantine.lock);
+
+    /* Release evicted entries outside the lock */
+    if (evict_count > 0) {
+        release_evict_batch(evict_batch, evict_count);
+    }
 }
 
 void quarantine_drain(void) {
     if (!quarantine.ring) return;
 
-    pthread_mutex_lock(&quarantine.lock);
+    alloc_entry_t *evict_batch[EVICT_BATCH_SIZE];
+    size_t evict_count;
 
-    while (quarantine.head != quarantine.tail) {
-        evict_oldest();
-    }
+    do {
+        pthread_mutex_lock(&quarantine.lock);
+        evict_count = collect_evict_batch(evict_batch, EVICT_BATCH_SIZE, 0);
+        pthread_mutex_unlock(&quarantine.lock);
 
-    pthread_mutex_unlock(&quarantine.lock);
+        release_evict_batch(evict_batch, evict_count);
+    } while (evict_count > 0);
 }
