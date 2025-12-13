@@ -43,12 +43,12 @@ Freed memory goes to quarantine: instead of releasing immediately, mguard marks 
 To use mguard with the JVM, enable JVM mode:
 
 ```
-MGUARD_JVM=1 LD_PRELOAD=./libmguard.so java -XX:+UseSerialGC YourApp
+MGUARD_JVM=1 LD_PRELOAD=./libmguard.so java YourApp
 ```
 
 In JVM mode, mguard skips installing its signal handler and lets the JVM handle SIGSEGV. When a guard page is hit, the JVM generates an `hs_err` crash report with full stack traces. Without JVM mode, mguard's handler would intercept the signal before the JVM sees it.
 
-Note: `-XX:+UseSerialGC` is recommended as other GCs use SIGSEGV internally for safepoints.
+**Warning:** mguard is slow (every allocation requires a syscall) and memory-intensive (every allocation uses at least one page). Use only for running tests, not production.
 
 ## License
 
