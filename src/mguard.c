@@ -4,6 +4,7 @@
 #include "interpose.h"
 #include "report.h"
 #include <stdio.h>
+#include <stdlib.h>
 
 /* Global initialization state */
 int g_mguard_initialized = 0;
@@ -18,8 +19,10 @@ static void mguard_init(void) {
     /* Parse configuration first (uses getenv, no allocations) */
     config_init();
 
-    fprintf(stderr, "[mguard] init: enabled=%d, verbose=%d, min_size=%zu\n",
-            g_config.enabled, g_config.verbose, g_config.min_size);
+    const char *jvm_mode = getenv("MGUARD_JVM");
+    int jvm_enabled = (jvm_mode && jvm_mode[0] == '1');
+    fprintf(stderr, "[mguard] init: enabled=%d, verbose=%d, min_size=%zu, jvm_mode=%d\n",
+            g_config.enabled, g_config.verbose, g_config.min_size, jvm_enabled);
 
     if (!g_config.enabled) {
         g_mguard_initialized = 1;
@@ -35,8 +38,12 @@ static void mguard_init(void) {
     /* Initialize quarantine */
     quarantine_init();
 
-    /* Install signal handler */
-    report_init();
+    /* Install signal handler (skip in JVM mode - let JVM handle signals) */
+    if (!jvm_enabled) {
+        report_init();
+    } else {
+        fprintf(stderr, "[mguard] JVM mode: skipping signal handler installation\n");
+    }
 
     if (g_config.verbose) {
         fprintf(stderr, "[mguard] initialized (page_size=%zu, quarantine=%zu entries)\n",

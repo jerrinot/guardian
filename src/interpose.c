@@ -12,6 +12,7 @@
 #include <stdint.h>
 #include <stdarg.h>
 #include <stdio.h>
+#include <stdlib.h>
 
 /* Debug tracing macro */
 #define TRACE(fmt, ...) \
@@ -37,6 +38,7 @@ real_memalign_t real_memalign = NULL;
 real_mmap_t real_mmap = NULL;
 real_munmap_t real_munmap = NULL;
 real_mremap_t real_mremap = NULL;
+
 
 /*
  * Bootstrap allocator for early allocations during dlsym resolution.
@@ -764,4 +766,22 @@ void *mremap(void *old_address, size_t old_size, size_t new_size, int flags, ...
           old_address, old_size, new_size, flags, new_ptr);
 
     return new_ptr;
+}
+
+/* ========== SIGACTION INTERPOSITION FOR JVM COMPATIBILITY ========== */
+
+/*
+ * In JVM mode (MGUARD_JVM=1), mguard does NOT install signal handlers.
+ * This allows the JVM to handle SIGSEGV directly. When mguard's guard page
+ * is hit, the JVM won't recognize the address, finds SIG_DFL in its chain,
+ * and calls VMError::report_and_die() to generate hs_err.
+ *
+ * The sigaction interposition is no longer needed - we simply don't install
+ * our handler in JVM mode (handled in mguard_init).
+ */
+
+/* Check if we're running in JVM mode */
+int mguard_has_jvm_wrapper(void) {
+    const char *env = getenv("MGUARD_JVM");
+    return (env && env[0] == '1');
 }

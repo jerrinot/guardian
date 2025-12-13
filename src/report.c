@@ -10,6 +10,10 @@
 static struct sigaction old_sigsegv_action;
 static struct sigaction old_sigbus_action;
 
+/* Prevent re-entry when chaining to JVM handler that chains back to us */
+static volatile sig_atomic_t in_sigsegv_handler = 0;
+static volatile sig_atomic_t in_sigbus_handler = 0;
+
 /*
  * Chain to previous signal handler.
  * Used when fault is not in mguard-managed memory (e.g., JVM internal SIGSEGV).
@@ -146,6 +150,18 @@ static void sigsegv_handler(int sig, siginfo_t *info, void *ucontext) {
     void *fault_addr = info->si_addr;
     char buf[32];
 
+    /*
+     * Prevent re-entry.
+     *
+     * The JVM saves mguard's handler in its signal chain. When a SIGSEGV
+     * occurs, the JVM's handler runs first, then chains to us. If we've
+     * already handled this signal (in_sigsegv_handler is set), just return
+     * and let the JVM continue its processing.
+     */
+    if (in_sigsegv_handler) {
+        return;
+    }
+
     /* Look up allocation containing this address */
     alloc_entry_t *entry = registry_lookup_containing(fault_addr);
 
@@ -172,6 +188,7 @@ static void sigsegv_handler(int sig, siginfo_t *info, void *ucontext) {
     }
 
     /* This is our fault - report it */
+    in_sigsegv_handler = 1;
     print_separator();
 
     if (entry->magic == MAGIC_FREED) {
@@ -207,7 +224,19 @@ static void sigsegv_handler(int sig, siginfo_t *info, void *ucontext) {
 
     print_separator();
 
-    /* Re-raise signal for core dump */
+    /*
+     * If running with JVM wrapper, just return - the wrapper will call JVM
+     * which will generate hs_err and terminate.
+     *
+     * If running standalone (no JVM), terminate with core dump.
+     */
+    extern int mguard_has_jvm_wrapper(void);
+    if (mguard_has_jvm_wrapper()) {
+        /* Let wrapper continue to JVM handler */
+        return;
+    }
+
+    /* No JVM - terminate with default handler for core dump */
     signal(SIGSEGV, SIG_DFL);
     raise(SIGSEGV);
 }
@@ -219,6 +248,12 @@ static void sigbus_handler(int sig, siginfo_t *info, void *ucontext) {
     void *fault_addr = info->si_addr;
     char buf[32];
 
+    /* Prevent re-entry (JVM handler may chain back to us) */
+    if (in_sigbus_handler) {
+        /* Just return - let the caller (JVM) continue its crash handling */
+        return;
+    }
+
     alloc_entry_t *entry = registry_lookup_containing(fault_addr);
 
     /*
@@ -229,6 +264,7 @@ static void sigbus_handler(int sig, siginfo_t *info, void *ucontext) {
         return;
     }
 
+    in_sigbus_handler = 1;
     print_separator();
     write_line("MGUARD: SIGBUS in tracked allocation (file mapping issue?)");
     print_separator();
@@ -242,6 +278,19 @@ static void sigbus_handler(int sig, siginfo_t *info, void *ucontext) {
     write_line(" byte(s) from start");
     print_separator();
 
+    /* Chain to next handler (same logic as SIGSEGV handler) */
+    struct sigaction current;
+    if (sigaction(SIGBUS, NULL, &current) == 0) {
+        if (current.sa_flags & SA_SIGINFO) {
+            if (current.sa_sigaction && current.sa_sigaction != sigbus_handler) {
+                current.sa_sigaction(sig, info, ucontext);
+            }
+        } else if (current.sa_handler && current.sa_handler != SIG_DFL &&
+                   current.sa_handler != SIG_IGN) {
+            current.sa_handler(sig);
+        }
+    }
+
     signal(SIGBUS, SIG_DFL);
     raise(SIGBUS);
 }
@@ -250,7 +299,18 @@ void report_init(void) {
     struct sigaction sa;
     memset(&sa, 0, sizeof(sa));
     sa.sa_sigaction = sigsegv_handler;
-    sa.sa_flags = SA_SIGINFO;
+    /*
+     * SA_SIGINFO: Use sa_sigaction instead of sa_handler
+     * SA_RESETHAND: Reset to SIG_DFL after first invocation
+     *
+     * SA_RESETHAND is important for JVM compatibility. When the JVM saves
+     * our handler in its signal chain, it checks for SA_RESETHAND. If set,
+     * after calling our handler once, the JVM resets the saved handler to
+     * SIG_DFL. On subsequent signals (like our raise(SIGSEGV)), the JVM
+     * finds SIG_DFL in the chain and calls VMError::report_and_die(),
+     * generating the hs_err crash report.
+     */
+    sa.sa_flags = SA_SIGINFO | SA_RESETHAND;
     sigemptyset(&sa.sa_mask);
     sigaction(SIGSEGV, &sa, &old_sigsegv_action);
 
