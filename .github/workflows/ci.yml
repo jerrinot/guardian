@@ -23,17 +23,17 @@ jobs:
       uses: actions/cache@v4
       with:
         path: ~/.cache/ubuntu-cloud
-        key: ubuntu-oracular-cloudimg-v1
+        key: ubuntu-questing-cloudimg-v1
 
     - name: Download Ubuntu 25.10 cloud image
       run: |
         mkdir -p ~/.cache/ubuntu-cloud
         cd ~/.cache/ubuntu-cloud
-        if [ ! -f oracular-server-cloudimg-amd64.img ]; then
-          wget -q https://cloud-images.ubuntu.com/oracular/current/oracular-server-cloudimg-amd64.img
+        if [ ! -f questing-server-cloudimg-amd64.img ]; then
+          wget -q https://cloud-images.ubuntu.com/questing/current/questing-server-cloudimg-amd64.img
         fi
         # Create a working copy
-        cp oracular-server-cloudimg-amd64.img ${{ github.workspace }}/vm.img
+        cp questing-server-cloudimg-amd64.img ${{ github.workspace }}/vm.img
         qemu-img resize ${{ github.workspace }}/vm.img 4G
 
     - name: Prepare cloud-init
