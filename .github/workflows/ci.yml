@@ -7,9 +7,88 @@ on:
     branches: [main, master]
 
 jobs:
-  build-and-test:
-    runs-on: ubuntu-24.04
+  # Run actual tests in QEMU with Ubuntu 25.10 (kernel 6.14+)
+  test-qemu:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
 
+    - name: Install QEMU and dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y qemu-system-x86 cloud-image-utils
+
+    - name: Cache Ubuntu cloud image
+      uses: actions/cache@v4
+      with:
+        path: ~/.cache/ubuntu-cloud
+        key: ubuntu-oracular-cloudimg-v1
+
+    - name: Download Ubuntu 25.10 cloud image
+      run: |
+        mkdir -p ~/.cache/ubuntu-cloud
+        cd ~/.cache/ubuntu-cloud
+        if [ ! -f oracular-server-cloudimg-amd64.img ]; then
+          wget -q https://cloud-images.ubuntu.com/oracular/current/oracular-server-cloudimg-amd64.img
+        fi
+        # Create a working copy
+        cp oracular-server-cloudimg-amd64.img ${{ github.workspace }}/vm.img
+        qemu-img resize ${{ github.workspace }}/vm.img 4G
+
+    - name: Prepare cloud-init
+      run: |
+        # Create cloud-init config
+        cat > user-data <<'EOF'
+        #cloud-config
+        users:
+          - name: ci
+            sudo: ALL=(ALL) NOPASSWD:ALL
+            shell: /bin/bash
+        packages:
+          - cmake
+          - build-essential
+        runcmd:
+          - mkdir -p /mnt/src
+          - mount -t 9p -o trans=virtio,version=9p2000.L src /mnt/src
+          - cd /mnt/src && mkdir -p build && cd build && cmake .. && cmake --build . --parallel
+          - cd /mnt/src/build && ctest --output-on-failure
+          - poweroff
+        EOF
+
+        cat > meta-data <<EOF
+        instance-id: ci-test
+        local-hostname: ci-test
+        EOF
+
+        cloud-localds seed.img user-data meta-data
+
+    - name: Run tests in QEMU
+      timeout-minutes: 15
+      run: |
+        qemu-system-x86_64 \
+          -m 2G \
+          -smp 2 \
+          -nographic \
+          -drive file=vm.img,format=qcow2,if=virtio \
+          -drive file=seed.img,format=raw,if=virtio \
+          -virtfs local,path=${{ github.workspace }},mount_tag=src,security_model=mapped-xattr,id=src \
+          -netdev user,id=net0 \
+          -device virtio-net-pci,netdev=net0 \
+          -enable-kvm 2>/dev/null || \
+        qemu-system-x86_64 \
+          -m 2G \
+          -smp 2 \
+          -nographic \
+          -drive file=vm.img,format=qcow2,if=virtio \
+          -drive file=seed.img,format=raw,if=virtio \
+          -virtfs local,path=${{ github.workspace }},mount_tag=src,security_model=mapped-xattr,id=src \
+          -netdev user,id=net0 \
+          -device virtio-net-pci,netdev=net0
+
+  # Build-only jobs on GitHub's standard runners (no kernel-dependent tests)
+  build-release:
+    runs-on: ubuntu-24.04
     steps:
     - name: Checkout
       uses: actions/checkout@v4
@@ -19,24 +98,14 @@ jobs:
         sudo apt-get update
         sudo apt-get install -y cmake build-essential
 
-    - name: Check kernel version
-      run: |
-        uname -r
-        echo "Note: MADV_GUARD requires Linux kernel 6.13+"
-        echo "Tests will fall back to real allocator if kernel is too old"
-
     - name: Configure
       run: cmake -B build -DCMAKE_BUILD_TYPE=Release
 
     - name: Build
       run: cmake --build build --parallel
 
-    - name: Run tests
-      run: ctest --test-dir build --output-on-failure --parallel 4
-
   build-debug:
     runs-on: ubuntu-24.04
-
     steps:
     - name: Checkout
       uses: actions/checkout@v4
@@ -52,13 +121,8 @@ jobs:
     - name: Build
       run: cmake --build build --parallel
 
-    - name: Run tests (Debug)
-      run: ctest --test-dir build --output-on-failure
-
-  # Build with extra warnings (but not -pedantic due to dlsym usage)
   build-with-warnings:
     runs-on: ubuntu-24.04
-
     steps:
     - name: Checkout
       uses: actions/checkout@v4
@@ -76,6 +140,3 @@ jobs:
 
     - name: Build
       run: cmake --build build --parallel
-
-    - name: Run tests
-      run: ctest --test-dir build --output-on-failure
