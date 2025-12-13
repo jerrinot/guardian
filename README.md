@@ -29,12 +29,26 @@ Environment variables:
 - `MGUARD_BUCKETS=65536` - registry hash buckets (default: 65536)
 - `MGUARD_PROTECT_BELOW=1` - detect underflows instead of overflows
 - `MGUARD_MIN_SIZE=N` - skip allocations smaller than N bytes
+- `MGUARD_FILL=0xAA` - fill pattern for padding bytes (default: 0xAA)
+- `MGUARD_JVM=1` - JVM compatibility mode (see below)
 
 ## How it works
 
 Each allocation gets a guard page. Overflows hit the guard page and trigger SIGSEGV with diagnostic output.
 
 Freed memory goes to quarantine: instead of releasing immediately, mguard marks it with MADV_GUARD and holds it in a ring buffer. If your program accesses freed memory, it crashes with "Use-after-free detected". Quarantined memory uses no physical RAM (only virtual address space), so the default 1M entries is essentially free.
+
+## JVM mode
+
+To use mguard with the JVM, enable JVM mode:
+
+```
+MGUARD_JVM=1 LD_PRELOAD=./libmguard.so java -XX:+UseSerialGC YourApp
+```
+
+In JVM mode, mguard skips installing its signal handler and lets the JVM handle SIGSEGV. When a guard page is hit, the JVM generates an `hs_err` crash report with full stack traces. Without JVM mode, mguard's handler would intercept the signal before the JVM sees it.
+
+Note: `-XX:+UseSerialGC` is recommended as other GCs use SIGSEGV internally for safepoints.
 
 ## License
 
