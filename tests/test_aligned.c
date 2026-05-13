@@ -8,8 +8,11 @@
 #include <string.h>
 #include <stdio.h>
 #include <stdint.h>
+#include <errno.h>
 
 int main(void) {
+    void *(*volatile aligned_alloc_fn)(size_t, size_t) = aligned_alloc;
+
     /* Test memalign */
     void *p1 = memalign(64, 1000);
     if (!p1) {
@@ -38,7 +41,7 @@ int main(void) {
     free(p2);
 
     /* Test aligned_alloc */
-    void *p3 = aligned_alloc(256, 256 * 4); /* size must be multiple of alignment */
+    void *p3 = aligned_alloc_fn(256, 256 * 4); /* size must be multiple of alignment */
     if (!p3) {
         fprintf(stderr, "aligned_alloc(256, 1024) failed\n");
         return 1;
@@ -47,7 +50,10 @@ int main(void) {
         fprintf(stderr, "aligned_alloc didn't return aligned pointer\n");
         return 1;
     }
-    memset(p3, 'C', 256 * 4);
+    volatile char *p3_bytes = (volatile char *)p3;
+    for (int i = 0; i < 256 * 4; i++) {
+        p3_bytes[i] = 'C';
+    }
     free(p3);
 
     /* Test valloc */
@@ -63,6 +69,35 @@ int main(void) {
     }
     memset(p4, 'D', 5000);
     free(p4);
+
+    /* Invalid memalign alignments should fail without crashing. */
+    errno = 0;
+    if (memalign(0, 128) != NULL || errno != EINVAL) {
+        fprintf(stderr, "memalign(0, 128) did not fail with EINVAL\n");
+        return 1;
+    }
+    errno = 0;
+    if (memalign(3, 128) != NULL || errno != EINVAL) {
+        fprintf(stderr, "memalign(3, 128) did not fail with EINVAL\n");
+        return 1;
+    }
+
+    /* Invalid aligned_alloc inputs should fail before any modulo by zero. */
+    errno = 0;
+    if (aligned_alloc_fn(0, 0) != NULL || errno != EINVAL) {
+        fprintf(stderr, "aligned_alloc(0, 0) did not fail with EINVAL\n");
+        return 1;
+    }
+    errno = 0;
+    if (aligned_alloc_fn(3, 12) != NULL || errno != EINVAL) {
+        fprintf(stderr, "aligned_alloc(3, 12) did not fail with EINVAL\n");
+        return 1;
+    }
+    errno = 0;
+    if (aligned_alloc_fn(64, 65) != NULL || errno != EINVAL) {
+        fprintf(stderr, "aligned_alloc(64, 65) did not fail with EINVAL\n");
+        return 1;
+    }
 
     printf("All aligned allocation tests passed!\n");
     return 0;

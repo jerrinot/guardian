@@ -1,5 +1,6 @@
 #include "report.h"
 #include "registry.h"
+#include "interpose.h"
 #include <signal.h>
 #include <unistd.h>
 #include <string.h>
@@ -11,18 +12,17 @@ static struct sigaction old_sigsegv_action;
 static struct sigaction old_sigbus_action;
 
 /* Prevent re-entry when chaining to JVM handler that chains back to us */
-static volatile sig_atomic_t in_sigsegv_handler = 0;
-static volatile sig_atomic_t in_sigbus_handler = 0;
-
-/* Check if running in JVM mode (from interpose.c) */
-extern int mguard_has_jvm_wrapper(void);
+static __thread volatile sig_atomic_t in_sigsegv_handler
+    __attribute__((tls_model("initial-exec"))) = 0;
+static __thread volatile sig_atomic_t in_sigbus_handler
+    __attribute__((tls_model("initial-exec"))) = 0;
 
 /*
  * Terminate the process. In JVM mode, trigger SIGSEGV so the JVM
  * generates hs_err. Otherwise, call abort().
  */
 static void mguard_die(void) {
-    if (mguard_has_jvm_wrapper()) {
+    if (g_mguard_jvm_mode) {
         /* Trigger SIGSEGV so JVM generates hs_err */
         *(volatile int *)0 = 0;
     }
@@ -63,7 +63,12 @@ static void chain_handler(struct sigaction *old_action, int sig, siginfo_t *info
 static void write_str(const char *s) {
     if (s) {
         /* In signal handler - nothing useful we can do if write fails */
-        ssize_t ret __attribute__((unused)) = write(STDERR_FILENO, s, strlen(s));
+        size_t len = 0;
+        const volatile char *p = (const volatile char *)s;
+        while (p[len] != '\0') {
+            len++;
+        }
+        ssize_t ret __attribute__((unused)) = write(STDERR_FILENO, s, len);
     }
 }
 
@@ -177,14 +182,17 @@ static void sigsegv_handler(int sig, siginfo_t *info, void *ucontext) {
         return;
     }
 
+    registry_signal_read_begin();
+
     /* Look up allocation containing this address */
-    alloc_entry_t *entry = registry_lookup_containing(fault_addr);
+    alloc_entry_t *entry = registry_lookup_containing_signal(fault_addr);
 
     /*
      * If fault is not in mguard-managed memory, chain to previous handler.
      * This is critical for JVM which uses SIGSEGV for null checks, safepoints, etc.
      */
     if (!entry) {
+        registry_signal_read_end();
         chain_handler(&old_sigsegv_action, sig, info, ucontext);
         return;
     }
@@ -192,12 +200,15 @@ static void sigsegv_handler(int sig, siginfo_t *info, void *ucontext) {
     uintptr_t user_start = (uintptr_t)entry->user_addr;
     uintptr_t user_end = user_start + entry->user_size;
     uintptr_t fault = (uintptr_t)fault_addr;
+    uint32_t magic = atomic_load_explicit(&entry->magic, memory_order_acquire);
 
     /*
      * Fault within valid user buffer is not ours - chain to previous handler.
      * Could be JVM internal or other legitimate SIGSEGV usage.
      */
-    if (fault >= user_start && fault < user_end && entry->magic != MAGIC_FREED) {
+    if (fault >= user_start && fault < user_end &&
+        magic != MAGIC_FREED && magic != MAGIC_FREEING) {
+        registry_signal_read_end();
         chain_handler(&old_sigsegv_action, sig, info, ucontext);
         return;
     }
@@ -206,7 +217,7 @@ static void sigsegv_handler(int sig, siginfo_t *info, void *ucontext) {
     in_sigsegv_handler = 1;
     print_separator();
 
-    if (entry->magic == MAGIC_FREED) {
+    if (magic == MAGIC_FREED || magic == MAGIC_FREEING) {
         write_line("MGUARD: Use-after-free detected!");
         print_separator();
         write_str("Fault address:   ");
@@ -238,6 +249,7 @@ static void sigsegv_handler(int sig, siginfo_t *info, void *ucontext) {
     }
 
     print_separator();
+    registry_signal_read_end();
 
     /*
      * If running with JVM wrapper, just return - the wrapper will call JVM
@@ -245,8 +257,7 @@ static void sigsegv_handler(int sig, siginfo_t *info, void *ucontext) {
      *
      * If running standalone (no JVM), terminate with core dump.
      */
-    extern int mguard_has_jvm_wrapper(void);
-    if (mguard_has_jvm_wrapper()) {
+    if (g_mguard_jvm_mode) {
         /* Let wrapper continue to JVM handler */
         return;
     }
@@ -269,12 +280,15 @@ static void sigbus_handler(int sig, siginfo_t *info, void *ucontext) {
         return;
     }
 
-    alloc_entry_t *entry = registry_lookup_containing(fault_addr);
+    registry_signal_read_begin();
+
+    alloc_entry_t *entry = registry_lookup_containing_signal(fault_addr);
 
     /*
      * If fault is not in mguard-managed memory, chain to previous handler.
      */
     if (!entry) {
+        registry_signal_read_end();
         chain_handler(&old_sigbus_action, sig, info, ucontext);
         return;
     }
@@ -292,6 +306,7 @@ static void sigbus_handler(int sig, siginfo_t *info, void *ucontext) {
     write_str(buf);
     write_line(" byte(s) from start");
     print_separator();
+    registry_signal_read_end();
 
     /* Chain to next handler (same logic as SIGSEGV handler) */
     struct sigaction current;
@@ -315,17 +330,11 @@ void report_init(void) {
     memset(&sa, 0, sizeof(sa));
     sa.sa_sigaction = sigsegv_handler;
     /*
-     * SA_SIGINFO: Use sa_sigaction instead of sa_handler
-     * SA_RESETHAND: Reset to SIG_DFL after first invocation
-     *
-     * SA_RESETHAND is important for JVM compatibility. When the JVM saves
-     * our handler in its signal chain, it checks for SA_RESETHAND. If set,
-     * after calling our handler once, the JVM resets the saved handler to
-     * SIG_DFL. On subsequent signals (like our raise(SIGSEGV)), the JVM
-     * finds SIG_DFL in the chain and calls VMError::report_and_die(),
-     * generating the hs_err crash report.
+     * SA_SIGINFO: Use sa_sigaction instead of sa_handler.
+     * Do not use SA_RESETHAND: a recoverable, non-mguard SIGSEGV would remove
+     * this handler before future guard-page faults can be reported.
      */
-    sa.sa_flags = SA_SIGINFO | SA_RESETHAND;
+    sa.sa_flags = SA_SIGINFO;
     sigemptyset(&sa.sa_mask);
     sigaction(SIGSEGV, &sa, &old_sigsegv_action);
 
@@ -394,6 +403,23 @@ void report_realloc_freed(void *ptr, alloc_entry_t *entry) {
     print_separator();
 
     write_str("Pointer:         ");
+    ptr_to_hex(ptr, buf, sizeof(buf));
+    write_line(buf);
+
+    print_entry_info(entry);
+    print_separator();
+
+    mguard_die();
+}
+
+void report_mremap_freed(void *ptr, alloc_entry_t *entry) {
+    char buf[32];
+
+    print_separator();
+    write_line("MGUARD: Mremap of freed mapping!");
+    print_separator();
+
+    write_str("Mapping:         ");
     ptr_to_hex(ptr, buf, sizeof(buf));
     write_line(buf);
 

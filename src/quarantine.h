@@ -11,15 +11,10 @@ void quarantine_init(void);
 
 /*
  * Add a freed allocation to quarantine.
- * The entire region will be marked as guard (SIGSEGV on access).
+ * The caller must already have marked the region as guard (SIGSEGV on access)
+ * and published MAGIC_FREED.
  * If quarantine is full, oldest entries are evicted.
  */
 void quarantine_add(alloc_entry_t *entry);
-
-/*
- * Drain all entries from quarantine and release memory.
- * Called during library shutdown.
- */
-void quarantine_drain(void);
 
 #endif /* MGUARD_QUARANTINE_H */

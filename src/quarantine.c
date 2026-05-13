@@ -1,8 +1,9 @@
 /*
  * quarantine.c - Ring buffer holding freed allocations for use-after-free detection
  *
- * Quarantined memory uses MADV_GUARD so it consumes virtual address space only,
- * not physical RAM. This allows large quarantine sizes (default 1M entries).
+ * Quarantined memory has already been marked with MADV_GUARD before it is
+ * added, so it consumes virtual address space only, not physical RAM. This
+ * allows large quarantine sizes (default 1M entries).
  */
 
 #include "quarantine.h"
@@ -103,9 +104,6 @@ void quarantine_add(alloc_entry_t *entry) {
         return;
     }
 
-    /* Mark entire allocation as guard (any access will SIGSEGV) */
-    guard_install(entry->real_addr, entry->real_size);
-
     alloc_entry_t *evict_batch[EVICT_BATCH_SIZE];
     size_t evict_count = 0;
 
@@ -127,19 +125,4 @@ void quarantine_add(alloc_entry_t *entry) {
     if (evict_count > 0) {
         release_evict_batch(evict_batch, evict_count);
     }
-}
-
-void quarantine_drain(void) {
-    if (!quarantine.ring) return;
-
-    alloc_entry_t *evict_batch[EVICT_BATCH_SIZE];
-    size_t evict_count;
-
-    do {
-        pthread_mutex_lock(&quarantine.lock);
-        evict_count = collect_evict_batch(evict_batch, EVICT_BATCH_SIZE);
-        pthread_mutex_unlock(&quarantine.lock);
-
-        release_evict_batch(evict_batch, evict_count);
-    } while (evict_count > 0);
 }

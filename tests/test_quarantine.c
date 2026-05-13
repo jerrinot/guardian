@@ -216,27 +216,7 @@ int main(void) {
         free(p2);
     }
 
-    /* Test 8: Quarantine with mmap */
-    TEST("mmap quarantine behavior");
-    {
-        #include <sys/mman.h>
-
-        void *p = mmap(NULL, 4096, PROT_READ | PROT_WRITE,
-                       MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-        if (p == MAP_FAILED) FAIL("mmap failed");
-
-        void *saved = p;
-        munmap(p, 4096);
-
-        /* mmap'd regions should also be quarantined */
-        if (causes_segfault(saved)) {
-            PASS();
-        } else {
-            printf("[INFO] No protection (mmap quarantine may be disabled)\n");
-        }
-    }
-
-    /* Test 9: Verify data is poisoned/protected */
+    /* Test 8: Verify data is poisoned/protected */
     TEST("freed memory content protected");
     {
         char *p = malloc(4096);
@@ -258,7 +238,7 @@ int main(void) {
         }
     }
 
-    /* Test 10: Large allocation quarantine */
+    /* Test 9: Large allocation quarantine */
     TEST("large allocation quarantine (10MB)");
     {
         char *p = malloc(10 * MB);

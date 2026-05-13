@@ -10,8 +10,11 @@
 int main(void) {
     printf("Testing off-by-one overflow detection on mmap...\n");
 
-    /* mmap 2000 bytes (not page aligned) */
-    size_t size = 2000;
+    /*
+     * mmap a non-page and non-16-byte-aligned size. The byte just past this
+     * length lands in mguard's intra-page post-padding, not the guard page.
+     */
+    size_t size = 4001;
     char *buf = mmap(NULL, size, PROT_READ | PROT_WRITE,
                      MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     if (buf == MAP_FAILED) {
@@ -25,7 +28,7 @@ int main(void) {
     printf("Buffer at %p, size %zu bytes\n", (void*)buf, size);
     printf("Writing to buf[%zu] (one byte past end)...\n", size);
 
-    /* Off-by-one write - this should trigger detection */
+    /* Off-by-one write - this should be detected when munmap checks padding. */
     buf[size] = 'X';
 
     /* Should not reach here */

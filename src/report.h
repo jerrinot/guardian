@@ -28,4 +28,9 @@ void report_overflow_on_free(void *ptr, alloc_entry_t *entry);
  */
 void report_realloc_freed(void *ptr, alloc_entry_t *entry);
 
+/*
+ * Report mremap of a freed mapping and abort.
+ */
+void report_mremap_freed(void *ptr, alloc_entry_t *entry);
+
 #endif /* MGUARD_REPORT_H */

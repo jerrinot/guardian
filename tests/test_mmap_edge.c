@@ -21,8 +21,14 @@
 #define KB (1024UL)
 #define MB (1024UL * KB)
 
+static size_t round_up_to_page(size_t value, size_t page_size) {
+    return ((value + page_size - 1) / page_size) * page_size;
+}
+
 int main(void) {
     printf("=== mmap/munmap/mremap Edge Case Tests ===\n");
+    long page_size = sysconf(_SC_PAGESIZE);
+    if (page_size <= 0) page_size = 4096;
 
     /* Test 1: Basic anonymous mmap */
     TEST("anonymous mmap PROT_READ|PROT_WRITE");
@@ -95,10 +101,20 @@ int main(void) {
         char *p = mmap(NULL, 1000, PROT_READ | PROT_WRITE,
                        MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
         if (p == MAP_FAILED) FAIL("mmap failed");
+        if ((uintptr_t)p % (uintptr_t)page_size != 0) FAIL("mmap address not page-aligned");
         memset(p, 'B', 1000);
         /* Access last requested byte */
         if (p[999] != 'B') FAIL("data corruption");
         if (munmap(p, 1000) != 0) FAIL("munmap failed");
+
+        p = mmap(NULL, 1000, PROT_READ | PROT_WRITE,
+                 MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        if (p == MAP_FAILED) FAIL("second mmap failed");
+        if ((uintptr_t)p % (uintptr_t)page_size != 0) FAIL("second mmap address not page-aligned");
+        memset(p, 'B', 1000);
+        if (munmap(p, round_up_to_page(1000, (size_t)page_size)) != 0) {
+            FAIL("munmap with page-rounded length failed");
+        }
         PASS();
     }
 
@@ -321,10 +337,7 @@ int main(void) {
         }
     }
 
-    /* Test 14: mmap works for various sizes
-     * Note: With mguard, addresses may not be page-aligned for sub-page sizes
-     * because mguard positions buffers for byte-precise overflow detection.
-     */
+    /* Test 14: mmap works for various sizes and keeps the kernel page-aligned ABI */
     TEST("mmap various sizes work correctly");
     {
         size_t sizes[] = {1, 100, 1000, 4095, 4096, 4097, 8192, 10000};
@@ -332,10 +345,14 @@ int main(void) {
             char *p = mmap(NULL, sizes[i], PROT_READ | PROT_WRITE,
                           MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
             if (p == MAP_FAILED) FAIL("mmap failed");
+            if ((uintptr_t)p % (uintptr_t)page_size != 0) FAIL("mmap address not page-aligned");
             /* Write to first and last byte to verify mapping is usable */
             p[0] = 'X';
             p[sizes[i] - 1] = 'Y';
-            munmap(p, sizes[i]);
+            size_t unmap_len = (i % 2 == 0)
+                               ? sizes[i]
+                               : round_up_to_page(sizes[i], (size_t)page_size);
+            if (munmap(p, unmap_len) != 0) FAIL("munmap failed");
         }
         PASS();
     }
@@ -370,6 +387,26 @@ int main(void) {
         if (*p != 'K') FAIL("data corruption");
 
         munmap(p, 65536);
+        PASS();
+    }
+
+    /* Test 17: mremap accepts page-rounded old size */
+    TEST("mremap with page-rounded old size");
+    {
+        size_t size = 1000;
+        size_t rounded = round_up_to_page(size, (size_t)page_size);
+        char *p = mmap(NULL, size, PROT_READ | PROT_WRITE,
+                       MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        if (p == MAP_FAILED) FAIL("mmap failed");
+        memset(p, 'L', size);
+
+        char *new_p = mremap(p, rounded, rounded * 2, MREMAP_MAYMOVE);
+        if (new_p == MAP_FAILED) FAIL("mremap failed");
+        for (size_t i = 0; i < size; i++) {
+            if (new_p[i] != 'L') FAIL("data corruption");
+        }
+
+        if (munmap(new_p, rounded * 2) != 0) FAIL("munmap failed");
         PASS();
     }
 

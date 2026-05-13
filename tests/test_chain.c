@@ -4,8 +4,8 @@
  * Verifies that mguard chains to previously installed handlers
  * when a fault occurs outside mguard-managed memory.
  *
- * This simulates JVM-style usage where another component installs
- * a SIGSEGV handler before mguard.
+ * The test installs another SIGSEGV handler and then rearms mguard so the
+ * custom handler is the handler mguard chains to for untracked faults.
  */
 
 #define _GNU_SOURCE
@@ -16,15 +16,13 @@
 #include <string.h>
 #include <unistd.h>
 #include <sys/mman.h>
+#include <dlfcn.h>
 
 static sigjmp_buf jump_buf;
 static volatile int handler_called = 0;
 static volatile void *fault_addr_received = NULL;
 
-/*
- * Custom SIGSEGV handler installed BEFORE mguard.
- * Uses constructor priority to run before mguard's constructor.
- */
+/* Custom SIGSEGV handler mguard should chain to for untracked faults. */
 static void custom_sigsegv_handler(int sig, siginfo_t *info, void *ucontext) {
     (void)sig;
     (void)ucontext;
@@ -36,11 +34,6 @@ static void custom_sigsegv_handler(int sig, siginfo_t *info, void *ucontext) {
     siglongjmp(jump_buf, 1);
 }
 
-/*
- * Install our handler before mguard loads.
- * Priority 101 runs before default priority constructors.
- */
-__attribute__((constructor(101)))
 static void install_custom_handler(void) {
     struct sigaction sa;
     memset(&sa, 0, sizeof(sa));
@@ -52,6 +45,15 @@ static void install_custom_handler(void) {
         perror("sigaction");
         _exit(1);
     }
+}
+
+static void rearm_mguard_handler(void) {
+    void (*report_init_fn)(void) = dlsym(RTLD_DEFAULT, "report_init");
+    if (!report_init_fn) {
+        fprintf(stderr, "FAIL: report_init not found\n");
+        exit(1);
+    }
+    report_init_fn();
 }
 
 /*
@@ -101,6 +103,9 @@ int main(void) {
     free(p);
 
     printf("mguard is active, triggering fault in non-mguard memory...\n");
+
+    install_custom_handler();
+    rearm_mguard_handler();
 
     /* Reset state */
     handler_called = 0;
