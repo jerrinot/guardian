@@ -4,6 +4,7 @@
  */
 #include <errno.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
 #include <unistd.h>
@@ -20,6 +21,20 @@ int main(void) {
         page_size = 4096;
     }
 
+    char *heap = malloc(page_size);
+    if (!heap) {
+        FAIL("malloc failed");
+    }
+    memset(heap, 'H', page_size);
+    errno = 0;
+    if (!expect_einval(munmap(heap, page_size))) {
+        FAIL("munmap of tracked heap allocation did not fail with EINVAL");
+    }
+    if (heap[0] != 'H' || heap[page_size - 1] != 'H') {
+        FAIL("heap allocation changed after rejected munmap");
+    }
+    free(heap);
+
     char *p = mmap(NULL, page_size * 4, PROT_READ | PROT_WRITE,
                    MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     if (p == MAP_FAILED) {
@@ -33,6 +48,14 @@ int main(void) {
     }
     if (p[0] != 'A' || p[page_size * 4 - 1] != 'A') {
         FAIL("mapping changed after zero-length munmap");
+    }
+
+    errno = 0;
+    if (!expect_einval(munmap(p, page_size * 5))) {
+        FAIL("overlarge munmap did not fail with EINVAL");
+    }
+    if (p[0] != 'A' || p[page_size * 4 - 1] != 'A') {
+        FAIL("mapping changed after rejected overlarge munmap");
     }
 
     errno = 0;

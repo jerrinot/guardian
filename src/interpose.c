@@ -165,6 +165,13 @@ static int is_mmap_entry(const alloc_entry_t *entry) {
     return entry->type == ALLOC_MMAP_ANON || entry->type == ALLOC_MMAP_FILE;
 }
 
+static int is_heap_entry(const alloc_entry_t *entry) {
+    return entry->type == ALLOC_MALLOC ||
+           entry->type == ALLOC_CALLOC ||
+           entry->type == ALLOC_REALLOC ||
+           entry->type == ALLOC_MEMALIGN;
+}
+
 static size_t mapped_user_span(const alloc_entry_t *entry) {
     if (!is_mmap_entry(entry) || entry->real_size < entry->guard_size) {
         return entry->user_size;
@@ -183,6 +190,33 @@ static size_t munmap_prefix_release_size(const alloc_entry_t *entry,
         return unmap_len + entry->guard_size;
     }
     return unmap_len;
+}
+
+typedef enum {
+    MUNMAP_LENGTH_INVALID,
+    MUNMAP_LENGTH_FULL,
+    MUNMAP_LENGTH_PREFIX
+} munmap_length_kind_t;
+
+static munmap_length_kind_t classify_munmap_length(const alloc_entry_t *entry,
+                                                   size_t length,
+                                                   size_t unmap_len) {
+    if (!is_mmap_entry(entry)) {
+        return MUNMAP_LENGTH_INVALID;
+    }
+
+    size_t user_span = mapped_user_span(entry);
+    if (length == entry->user_size ||
+        length == user_span ||
+        unmap_len == user_span) {
+        return MUNMAP_LENGTH_FULL;
+    }
+
+    if (unmap_len < user_span) {
+        return MUNMAP_LENGTH_PREFIX;
+    }
+
+    return MUNMAP_LENGTH_INVALID;
 }
 
 static void release_claimed_entry(void *ptr, alloc_entry_t *entry) {
@@ -414,6 +448,14 @@ void free(void *ptr) {
         /* report_double_free calls abort() */
     }
 
+    if (!is_heap_entry(entry)) {
+        registry_unclaim_free(entry);
+        g_in_mguard = 0;
+        TRACE("free(%p) [tracked non-heap entry, delegating to real_free]", ptr);
+        real_free(ptr);
+        return;
+    }
+
     TRACE("free(%p) [guarded, base=%p, size=%zu, magic=0x%x]",
           ptr, entry->real_addr, entry->user_size, MAGIC_FREED);
 
@@ -511,6 +553,14 @@ void *realloc(void *ptr, size_t size) {
 
     size_t old_size = entry->user_size;
     TRACE("realloc(%p, %zu) [guarded, old_size=%zu]", ptr, size, old_size);
+
+    if (!is_heap_entry(entry)) {
+        registry_unclaim_realloc(entry);
+        g_in_mguard = 0;
+        TRACE("realloc(%p, %zu) [tracked non-heap entry, delegating to real_realloc]",
+              ptr, size);
+        return real_realloc(ptr, size);
+    }
 
     g_in_mguard = 0;
 
@@ -896,6 +946,14 @@ int munmap(void *addr, size_t length) {
         /* report_double_munmap calls abort() */
     }
 
+    if (!is_mmap_entry(entry)) {
+        registry_unclaim_free(entry);
+        g_in_mguard = 0;
+        errno = EINVAL;
+        TRACE("munmap(%p, %zu) = -1 [tracked non-mmap entry]", addr, length);
+        return -1;
+    }
+
     TRACE("munmap(%p, %zu) [guarded, base=%p, real_size=%zu, magic=0x%x]",
           addr, length, entry->real_addr, entry->real_size, MAGIC_FREED);
 
@@ -909,18 +967,16 @@ int munmap(void *addr, size_t length) {
         return -1;
     }
 
-    size_t user_span = mapped_user_span(entry);
-    if (!is_mmap_entry(entry) && !tracked_length_matches(entry, length)) {
+    munmap_length_kind_t length_kind = classify_munmap_length(entry, length, unmap_len);
+    if (length_kind == MUNMAP_LENGTH_INVALID) {
         registry_unclaim_free(entry);
         g_in_mguard = 0;
         errno = EINVAL;
-        TRACE("munmap(%p, %zu) = -1 [partial non-mmap tracked allocation]",
-              addr, length);
+        TRACE("munmap(%p, %zu) = -1 [invalid tracked mmap length]", addr, length);
         return -1;
     }
 
-    if (is_mmap_entry(entry) && !tracked_length_matches(entry, length) &&
-        unmap_len < user_span) {
+    if (length_kind == MUNMAP_LENGTH_PREFIX) {
         size_t release_len = munmap_prefix_release_size(entry, unmap_len);
         void *old_user_addr = entry->user_addr;
         void *old_real_addr = entry->real_addr;
@@ -1043,6 +1099,14 @@ void *mremap(void *old_address, size_t old_size, size_t new_size, int flags, ...
 
     TRACE("mremap(%p, %zu, %zu, 0x%x) [guarded, doing alloc-copy-free]",
           old_address, old_size, new_size, flags);
+
+    if (!is_mmap_entry(entry)) {
+        registry_unclaim_realloc(entry);
+        g_in_mguard = 0;
+        errno = EINVAL;
+        TRACE("mremap: tracked non-mmap entry unsupported");
+        return MAP_FAILED;
+    }
 
     if (!(flags & MREMAP_MAYMOVE)) {
         registry_unclaim_realloc(entry);

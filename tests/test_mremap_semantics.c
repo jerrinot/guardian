@@ -32,6 +32,20 @@ int main(void) {
         page_size = 4096;
     }
 
+    char *heap = malloc(page_size);
+    if (!heap) {
+        FAIL("malloc failed");
+    }
+    memset(heap, 'H', page_size);
+    if (!expect_failed_mremap(heap, page_size, page_size * 2,
+                              MREMAP_MAYMOVE, NULL, EINVAL)) {
+        FAIL("mremap of tracked heap allocation did not fail with EINVAL");
+    }
+    if (heap[0] != 'H' || heap[page_size - 1] != 'H') {
+        FAIL("heap allocation changed after rejected mremap");
+    }
+    free(heap);
+
     char *p = mmap(NULL, page_size, PROT_READ | PROT_WRITE,
                    MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     if (p == MAP_FAILED) {
